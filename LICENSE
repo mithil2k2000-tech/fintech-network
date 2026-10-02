@@ -1,0 +1,16 @@
+Copyright (c) 2026 Raghavan Yasotharan. All rights reserved.
+
+This source code is published for reading and review only.
+
+No licence is granted. You may view this repository and its history.
+You may not copy, modify, merge, publish, distribute, sublicense, sell,
+or create derivative works from any part of it, in whole or in part,
+without the prior written permission of the copyright holder.
+
+This software is provided "as is", without warranty of any kind, express
+or implied. It is an unfinished prototype that uses simulated financial
+infrastructure: it moves no real money, connects to no real bank
+accounts, holds no real payment credentials, and is not an authorised
+financial service in any jurisdiction. Nothing in it should be relied on
+as financial, legal or regulatory advice, and no part of it is fit for
+production use.

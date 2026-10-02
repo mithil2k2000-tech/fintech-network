@@ -1,0 +1,106 @@
+# Local prototype stack: `docker compose -f infra/docker-compose.yml up`
+# Dependencies are installed once by the `deps` service, then every app
+# starts from that install (running pnpm install in several containers
+# at once against the same folder can corrupt node_modules).
+
+x-node: &node
+  image: node:22-alpine
+  working_dir: /workspace
+  volumes:
+    - ..:/workspace
+  environment: &node-env
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fintech
+      POSTGRES_PASSWORD: fintech
+      POSTGRES_DB: fintech_network
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintech"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  deps:
+    <<: *node
+    command: sh -c "corepack enable && pnpm install --frozen-lockfile"
+
+  api:
+    <<: *node
+    command: sh -c "corepack enable && pnpm --filter @fintech-network/api migrate up && pnpm --filter @fintech-network/api dev"
+    environment:
+      <<: *node-env
+      DATABASE_URL: postgres://fintech:fintech@postgres:5432/fintech_network
+      PORT: "3000"
+      APP_NAME: FinTech Network
+      JWT_SECRET: dev-only-change-me
+      # The three apps, as reached from a browser on the host. The API
+      # honours a session cookie only from these (spec §14).
+      ALLOWED_ORIGINS: http://localhost:5173,http://localhost:5174,http://localhost:5175
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      deps:
+        condition: service_completed_successfully
+
+  web-consumer:
+    <<: *node
+    command: sh -c "corepack enable && pnpm --filter web-consumer dev --host 0.0.0.0"
+    environment:
+      <<: *node-env
+      API_PROXY_TARGET: http://api:3000
+    ports:
+      - "5173:5173"
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
+  web-merchant:
+    <<: *node
+    command: sh -c "corepack enable && pnpm --filter web-merchant dev --host 0.0.0.0"
+    environment:
+      <<: *node-env
+      API_PROXY_TARGET: http://api:3000
+      # A QR shown on the till points into the customer's app, which is
+      # reached from a phone's browser — not from inside this network.
+      VITE_PAY_ORIGIN: http://localhost:5173
+    ports:
+      - "5174:5174"
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
+  web-admin:
+    <<: *node
+    command: sh -c "corepack enable && pnpm --filter web-admin dev --host 0.0.0.0"
+    environment:
+      <<: *node-env
+      # Since Phase 15 this app talks to the API like the other two, and
+      # needs the same same-origin proxy — the session cookie is
+      # SameSite=Strict, so a cross-origin API would silently sign
+      # everyone out.
+      API_PROXY_TARGET: http://api:3000
+    ports:
+      - "5175:5175"
+    depends_on:
+      deps:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:

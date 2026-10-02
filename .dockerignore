@@ -1,0 +1,16 @@
+# Keeping the build context small and the image clean. node_modules
+# especially: it is the largest thing in the repo and the image installs
+# its own anyway.
+node_modules
+**/node_modules
+**/dist
+**/.vite
+**/test-results
+**/playwright-report
+.git
+.github
+.env
+.env.*
+!.env.example
+docs
+*.log

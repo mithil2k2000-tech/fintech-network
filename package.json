@@ -1,0 +1,20 @@
+{
+  "name": "fintech-network",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Project FinTech Network \u2014 Prototype v0.1 (simulated financial infrastructure, no real money).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:api": "pnpm --filter @fintech-network/api dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "test:integration": "pnpm --filter @fintech-network/api test:integration",
+    "typecheck": "pnpm -r typecheck",
+    "e2e": "pnpm --filter web-consumer e2e",
+    "check:migrations": "node scripts/check-migrations.mjs",
+    "verify": "pnpm check:migrations && pnpm typecheck && pnpm test && pnpm build && pnpm test:integration && pnpm e2e"
+  },
+  "packageManager": "pnpm@12.4.2"
+}

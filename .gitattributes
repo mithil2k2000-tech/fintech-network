@@ -1,0 +1,9 @@
+# Authored on Linux, read on Windows. Normalising line endings in the
+# repository keeps a Windows checkout from showing every file as
+# modified the moment it is cloned.
+* text=auto eol=lf
+
+# Binary, and never to be line-ending-converted.
+*.png binary
+*.jpg binary
+*.ico binary

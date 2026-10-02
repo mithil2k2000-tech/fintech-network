@@ -1,0 +1,136 @@
+# A production-shaped stack (Phase 17).
+#
+# This is not a production deployment — it is the *shape* of one, on one
+# machine, so the arrangement can be looked at and argued with rather
+# than described. What it shows that the development compose file can't:
+#
+#   * built images, not a shared source volume and a dev server;
+#   * migrations as a separate step that runs to completion before the
+#     API starts, rather than every replica racing to migrate;
+#   * the database reachable only from inside the network;
+#   * every secret and origin coming from the environment, with no
+#     defaults to fall back to.
+#
+# Run it with a real .env beside it:
+#   docker compose -f infra/docker-compose.prod.yml --env-file .env.prod up
+#
+# What a real deployment changes is in docs/architecture/README.md —
+# starting with the database, which belongs to a managed service rather
+# than to a container next to the app.
+
+name: fintech-network
+
+x-api-env: &api-env
+  NODE_ENV: production
+  DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?set ALLOWED_ORIGINS}
+  APP_NAME: ${APP_NAME:-FinTech Network}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No published port. The database is reachable from this network and
+    # nowhere else — in a real deployment it isn't here at all.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Runs once, to completion, before the API comes up. A deploy applies
+  # migrations exactly once; four replicas migrating on start-up would
+  # be four processes altering the same schema at the same time.
+  migrate:
+    image: ${API_IMAGE:-fintech-network-api:latest}
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    environment: *api-env
+    command: ["pnpm", "migrate", "up"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: ${API_IMAGE:-fintech-network-api:latest}
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+      PORT: "3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness. Readiness (/health/ready) is what a load balancer
+      # should ask; see docs/deployment/README.md for why they differ.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  web-consumer:
+    image: ${CONSUMER_IMAGE:-fintech-network-consumer:latest}
+    build:
+      context: ..
+      dockerfile: apps/Dockerfile
+      args:
+        APP: web-consumer
+        VITE_APP_NAME: ${APP_NAME:-FinTech Network}
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: http://api:3000
+    ports:
+      - "${CONSUMER_PORT:-8080}:80"
+    depends_on:
+      - api
+
+  web-merchant:
+    image: ${MERCHANT_IMAGE:-fintech-network-merchant:latest}
+    build:
+      context: ..
+      dockerfile: apps/Dockerfile
+      args:
+        APP: web-merchant
+        VITE_APP_NAME: ${APP_NAME:-FinTech Network}
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: http://api:3000
+    ports:
+      - "${MERCHANT_PORT:-8081}:80"
+    depends_on:
+      - api
+
+  web-admin:
+    image: ${ADMIN_IMAGE:-fintech-network-admin:latest}
+    build:
+      context: ..
+      dockerfile: apps/Dockerfile
+      args:
+        APP: web-admin
+        VITE_APP_NAME: ${APP_NAME:-FinTech Network}
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: http://api:3000
+    ports:
+      # Bound to the loopback interface: an operations view has no
+      # business being reachable from the internet, and this is the
+      # cheapest version of that rule.
+      - "127.0.0.1:${ADMIN_PORT:-8082}:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
