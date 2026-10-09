@@ -1,0 +1,73 @@
+name: "Ops: promote an admin"
+
+# There is deliberately no way to create an admin through the app
+# (docs/deployment/README.md): an operator promotes an existing account
+# in the database. In AWS the database has no route to the internet, so
+# "in the database" means a one-off task inside the network — this.
+#
+# Run it by hand from the Actions tab. The account must already exist,
+# and has to sign in again afterwards because the role is carried in the
+# session token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: Email address of the existing account to make an admin
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  PREFIX: fintech-network-prod
+
+jobs:
+  promote:
+    name: Promote
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run the update inside the network
+        env:
+          # Passed as data, never pasted into a command: the address is
+          # a query parameter all the way down.
+          EMAIL: ${{ inputs.email }}
+        run: |
+          script='const{Client}=require("pg");(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();const r=await c.query("update users set role = $1 where email = $2",["admin",process.env.PROMOTE_EMAIL]);console.log("accounts promoted: "+r.rowCount);await c.end();process.exit(r.rowCount===1?0:1)})().catch(e=>{console.error(e.message);process.exit(1)})'
+          overrides=$(jq -n --arg script "$script" --arg email "$EMAIL" '{
+            containerOverrides: [{
+              name: "api",
+              command: ["node", "-e", $script],
+              environment: [{ name: "PROMOTE_EMAIL", value: $email }]
+            }]
+          }')
+          network=$(aws ecs describe-services --cluster "$PREFIX" --services "$PREFIX-api" \
+            --query 'services[0].networkConfiguration' --output json)
+          taskdef=$(aws ecs describe-services --cluster "$PREFIX" --services "$PREFIX-api" \
+            --query 'services[0].taskDefinition' --output text)
+
+          task=$(aws ecs run-task --cluster "$PREFIX" --task-definition "$taskdef" \
+            --launch-type FARGATE --network-configuration "$network" \
+            --overrides "$overrides" --started-by "promote-admin" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Task: $task"
+          aws ecs wait tasks-stopped --cluster "$PREFIX" --tasks "$task"
+
+          aws logs get-log-events --log-group-name "/ecs/$PREFIX/api" \
+            --log-stream-name "api/api/${task##*/}" --start-from-head \
+            --query 'events[].message' --output text | tr '\t' '\n' || true
+
+          code=$(aws ecs describe-tasks --cluster "$PREFIX" --tasks "$task" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$code" != "0" ]; then
+            echo "::error::No account was promoted. Is that the exact address of an account that already exists?"
+            exit 1
+          fi

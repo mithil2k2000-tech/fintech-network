@@ -1,0 +1,276 @@
+name: Deploy
+
+# Builds the four images, applies migrations, and rolls the services on
+# ECS — after CI has passed on main, and never before.
+#
+# There are no AWS keys anywhere in this repository or its settings.
+# GitHub issues this run a short-lived identity token; AWS trusts that
+# token for this repository's main branch only and swaps it for
+# credentials that expire within the hour
+# (infra/terraform/bootstrap/github_oidc.tf).
+#
+# The order is the one docs/architecture/README.md argues for:
+#   build → migrate (once, to completion) → deploy → verify
+# and rollback is automatic: if the new version never passes its health
+# checks, ECS puts the previous one back and this workflow fails.
+#
+# Setup (docs/deployment/aws.md): two repository *variables*, not
+# secrets, because neither is one —
+#   AWS_DEPLOY_ROLE_ARN   the bootstrap stack's deploy_role_arn output
+#   APP_URL               optional; the app stack's app_url output
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and a queued one waits rather than cancelling
+# the one in flight: half a deploy is worse than a late one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # ask GitHub for the identity token AWS will trust
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-2' }}
+  # Must match `project` and `environment` in infra/terraform.
+  PROJECT: fintech-network
+  PREFIX: fintech-network-prod
+  # The commit CI just passed — not whatever main has moved on to since.
+  COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  images:
+    name: Build ${{ matrix.image }}
+    # Skipped (not failed) until AWS is set up, and only ever for a
+    # green CI run that came from a push to main.
+    if: >-
+      vars.AWS_DEPLOY_ROLE_ARN != '' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: api
+            dockerfile: services/api/Dockerfile
+          - image: web-consumer
+            dockerfile: apps/Dockerfile
+          - image: web-merchant
+            dockerfile: apps/Dockerfile
+          - image: web-admin
+            dockerfile: apps/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Tagged with the commit, so what is running can always be traced
+      # to the code it was built from. `latest` moves too, but only so a
+      # fresh environment has something to start on.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: |
+            APP=${{ matrix.image }}
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.image }}:${{ env.COMMIT }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          provenance: false
+
+  deploy:
+    name: Migrate and deploy
+    needs: [images]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # The images can be pushed before the infrastructure exists — that
+      # is how a new environment is bootstrapped. In that case stop
+      # here, successfully.
+      - name: Is there anything to deploy to?
+        id: target
+        run: |
+          status=$(aws ecs describe-services --cluster "$PREFIX" --services "$PREFIX-api" \
+            --query 'services[0].status' --output text 2>/dev/null || true)
+          if [ "$status" = "ACTIVE" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Images pushed. The ECS services don't exist yet, so there is nothing to deploy to — apply infra/terraform/app, then run this workflow again."
+          fi
+
+      # A new revision of the task definition: the current one with the
+      # image swapped. Copying the current one means settings changed in
+      # Terraform are picked up here too.
+      - name: Register the new API version
+        if: steps.target.outputs.ready == 'true'
+        id: api
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}/api:${{ env.COMMIT }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$PREFIX-api" --query taskDefinition \
+            | jq --arg image "$IMAGE" '
+                .containerDefinitions[0].image = $image
+                | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                      .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            > taskdef.json
+          arn=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "taskdef=$arn" >> "$GITHUB_OUTPUT"
+          echo "Registered $arn"
+
+      # Once, to completion, before any new API task starts — never on
+      # start-up, where every replica would race to alter the same
+      # schema. It runs the NEW image, because that is the one carrying
+      # the new migration files. Migrations are additive (CI enforces
+      # it), so the old version keeps working while this runs.
+      - name: Apply database migrations
+        if: steps.target.outputs.ready == 'true'
+        env:
+          TASKDEF: ${{ steps.api.outputs.taskdef }}
+        run: |
+          network=$(aws ecs describe-services --cluster "$PREFIX" --services "$PREFIX-api" \
+            --query 'services[0].networkConfiguration' --output json)
+          overrides='{"containerOverrides":[{"name":"api","command":["node_modules/.bin/node-pg-migrate","--migrations-dir","../../infra/migrations","up"]}]}'
+
+          task=$(aws ecs run-task --cluster "$PREFIX" --task-definition "$TASKDEF" \
+            --launch-type FARGATE --network-configuration "$network" \
+            --overrides "$overrides" --started-by "deploy-${COMMIT:0:12}" \
+            --query 'tasks[0].taskArn' --output text)
+          if [ -z "$task" ] || [ "$task" = "None" ]; then
+            echo "::error::The migration task could not be started."
+            exit 1
+          fi
+          echo "Migration task: $task"
+          aws ecs wait tasks-stopped --cluster "$PREFIX" --tasks "$task"
+
+          echo "::group::Migration output"
+          aws logs get-log-events --log-group-name "/ecs/$PREFIX/api" \
+            --log-stream-name "api/api/${task##*/}" --start-from-head \
+            --query 'events[].message' --output text | tr '\t' '\n' || true
+          echo "::endgroup::"
+
+          code=$(aws ecs describe-tasks --cluster "$PREFIX" --tasks "$task" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$code" != "0" ]; then
+            reason=$(aws ecs describe-tasks --cluster "$PREFIX" --tasks "$task" \
+              --query 'tasks[0].stoppedReason' --output text)
+            echo "::error::Migrations failed (exit code $code: $reason). Nothing was deployed; the previous version is still serving."
+            exit 1
+          fi
+
+      - name: Deploy the API
+        if: steps.target.outputs.ready == 'true'
+        env:
+          TASKDEF: ${{ steps.api.outputs.taskdef }}
+        run: |
+          aws ecs update-service --cluster "$PREFIX" --service "$PREFIX-api" \
+            --task-definition "$TASKDEF" --query 'service.serviceName' --output text
+          aws ecs wait services-stable --cluster "$PREFIX" --services "$PREFIX-api"
+
+          # "Stable" is also what a rolled-back service looks like, so
+          # check which version it settled on.
+          running=$(aws ecs describe-services --cluster "$PREFIX" --services "$PREFIX-api" \
+            --query 'services[0].deployments[?status==`PRIMARY`] | [0].taskDefinition' --output text)
+          if [ "$running" != "$TASKDEF" ]; then
+            echo "::error::The new API version never became healthy and ECS rolled it back. Still running: $running"
+            exit 1
+          fi
+          echo "API is running $TASKDEF"
+
+      - name: Deploy the front ends
+        if: steps.target.outputs.ready == 'true'
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          deployed=()
+          declare -A wanted
+          for app in web-consumer web-merchant web-admin; do
+            service="$PREFIX-$app"
+            status=$(aws ecs describe-services --cluster "$PREFIX" --services "$service" \
+              --query 'services[0].status' --output text 2>/dev/null || true)
+            if [ "$status" != "ACTIVE" ]; then
+              echo "$app is not deployed in this environment; skipping."
+              continue
+            fi
+
+            aws ecs describe-task-definition --task-definition "$service" --query taskDefinition \
+              | jq --arg image "$REGISTRY/$PROJECT/$app:$COMMIT" '
+                  .containerDefinitions[0].image = $image
+                  | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                        .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+              > "taskdef-$app.json"
+            arn=$(aws ecs register-task-definition --cli-input-json "file://taskdef-$app.json" \
+              --query taskDefinition.taskDefinitionArn --output text)
+            aws ecs update-service --cluster "$PREFIX" --service "$service" \
+              --task-definition "$arn" --query 'service.serviceName' --output text
+            deployed+=("$service")
+            wanted[$service]=$arn
+          done
+
+          [ ${#deployed[@]} -eq 0 ] && exit 0
+          aws ecs wait services-stable --cluster "$PREFIX" --services "${deployed[@]}"
+
+          failed=0
+          for service in "${deployed[@]}"; do
+            running=$(aws ecs describe-services --cluster "$PREFIX" --services "$service" \
+              --query 'services[0].deployments[?status==`PRIMARY`] | [0].taskDefinition' --output text)
+            if [ "$running" != "${wanted[$service]}" ]; then
+              echo "::error::$service was rolled back. Still running: $running"
+              failed=1
+            fi
+          done
+          exit $failed
+
+      # From the outside, the way a user arrives: the app is served, and
+      # /api reaches the API (401 is the right answer with no session —
+      # it means the request got there and was refused properly).
+      - name: Smoke test
+        if: steps.target.outputs.ready == 'true' && vars.APP_URL != ''
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          page=$(curl -sS -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --retry-all-errors "$APP_URL/")
+          api=$(curl -sS -o /dev/null -w '%{http_code}' --retry 5 --retry-delay 5 --retry-all-errors "$APP_URL/api/v1/users/me")
+          echo "GET /                 -> $page (want 200)"
+          echo "GET /api/v1/users/me  -> $api (want 401)"
+          [ "$page" = "200" ] && [ "$api" = "401" ]
+
+      - name: Summary
+        if: steps.target.outputs.ready == 'true'
+        run: |
+          {
+            echo "### Deployed \`${COMMIT:0:12}\`"
+            echo ""
+            echo "- API task definition: \`${{ steps.api.outputs.taskdef }}\`"
+            echo "- Migrations applied before the new version started"
+            echo "- All services stable on the new version"
+          } >> "$GITHUB_STEP_SUMMARY"

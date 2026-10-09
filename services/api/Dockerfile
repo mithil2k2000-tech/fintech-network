@@ -40,6 +40,13 @@ FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
+# A managed PostgreSQL on AWS presents a certificate signed by Amazon's
+# RDS authority, which isn't in Node's built-in list. Adding it lets the
+# connection be verified (sslmode=verify-full) rather than merely
+# encrypted to whoever answered. It changes nothing for a database that
+# doesn't use TLS, such as the one in docker-compose.
+ADD --chmod=644 https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/certs/aws-rds-global-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/aws-rds-global-bundle.pem
 COPY --from=build --chown=node:node /repo /repo
 WORKDIR /repo/services/api
 # Node's own unprivileged user. A process that never writes to its own

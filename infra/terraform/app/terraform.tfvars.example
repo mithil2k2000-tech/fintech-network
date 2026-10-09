@@ -1,0 +1,28 @@
+# Copy to terraform.tfvars (which is git-ignored) and fill in.
+
+# A public hosted zone you own in Route 53, and the name inside it the
+# apps should hang off. This gives app.fintech.example.com,
+# till.fintech.example.com and admin.fintech.example.com.
+route53_zone_name = "example.com"
+domain_name       = "fintech.example.com"
+
+# Alarms, GuardDuty findings and failed deployments. AWS sends a
+# confirmation email first; nothing arrives until you click it.
+alert_email = "you@example.com"
+
+# Your own public IP, so only you can open the admin app.
+# Find it with: curl https://checkip.amazonaws.com
+admin_allowed_cidrs = ["203.0.113.7/32"]
+
+# ---- Cheaper ----------------------------------------------------------
+# web_apps = ["web-consumer"]        # run only the consumer app
+
+# ---- More production-like (and more expensive) ------------------------
+# api_min_count          = 2         # survive losing an availability zone
+# db_multi_az            = true      # standby database with failover
+# db_deletion_protection = true
+# db_skip_final_snapshot = false
+# container_insights     = true
+
+# ---- If something already exists in the account -----------------------
+# enable_guardduty = false           # the account already has a detector

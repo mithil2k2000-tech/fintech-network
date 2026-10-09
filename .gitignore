@@ -6,3 +6,12 @@ dist/
 *.tsbuildinfo
 test-results/
 playwright-report/
+
+# Terraform: downloaded providers, state (which holds secrets) and your
+# own variable values. The lock file IS committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log

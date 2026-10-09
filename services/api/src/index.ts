@@ -68,8 +68,22 @@ export interface AppOptions {
   metrics?: MetricsRegistry;
 }
 
+/**
+ * How many proxies sit between the internet and this process (env
+ * TRUST_PROXY_HOPS). Behind a load balancer every request arrives from
+ * the load balancer's address, so without this the per-client rate
+ * limits become one limit shared by everybody. Unset means none: the
+ * forwarded-for header is ignored, because trusting it with no proxy in
+ * front would let any caller choose their own address.
+ */
+function trustProxyHops(): number | false {
+  const hops = Number.parseInt(process.env.TRUST_PROXY_HOPS ?? "", 10);
+  return Number.isSafeInteger(hops) && hops > 0 ? hops : false;
+}
+
 export function buildApp(options: AppOptions = {}) {
   const app = Fastify({
+    trustProxy: trustProxyHops(),
     logger:
       options.logger === false
         ? false

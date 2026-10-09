@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (which is git-ignored) and fill in.
+
+budget_alert_email = "you@example.com"
+
+# Defaults, shown so they're easy to change:
+# aws_region                  = "eu-west-2"
+# github_repository           = "mithil2k2000-tech/fintech-network"
+# monthly_budget_usd          = 30
+# create_github_oidc_provider = true   # false if the account already has one

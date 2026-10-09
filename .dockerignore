@@ -14,3 +14,5 @@ node_modules
 !.env.example
 docs
 *.log
+# Terraform downloads its providers (hundreds of MB) next to the code.
+infra/terraform

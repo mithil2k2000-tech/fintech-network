@@ -1,0 +1,34 @@
+name: Terraform
+
+# Checks the infrastructure code on every change to it: formatting, and
+# that both stacks are internally consistent. Neither needs AWS
+# credentials — nothing here can touch a real account. Applying is done
+# by a person, on purpose (docs/deployment/aws.md).
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/terraform/**", ".github/workflows/terraform.yml"]
+  pull_request:
+    paths: ["infra/terraform/**", ".github/workflows/terraform.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Format and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.10"
+      - name: Formatting
+        run: terraform fmt -check -recursive -diff infra/terraform
+      - name: Validate bootstrap
+        working-directory: infra/terraform/bootstrap
+        run: terraform init -backend=false -input=false && terraform validate
+      - name: Validate app
+        working-directory: infra/terraform/app
+        run: terraform init -backend=false -input=false && terraform validate
