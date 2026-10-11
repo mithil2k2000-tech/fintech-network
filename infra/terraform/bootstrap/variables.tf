@@ -22,6 +22,18 @@ variable "github_repository" {
   default     = "mithil2k2000-tech/fintech-network"
 }
 
+variable "github_owner_id" {
+  description = "Numeric id of the GitHub account that owns the repository. From: gh api users/<owner> --jq .id"
+  type        = string
+  default     = "268686439"
+}
+
+variable "github_repository_id" {
+  description = "Numeric id of the repository. From: gh api repos/<owner>/<repo> --jq .id"
+  type        = string
+  default     = "1401475595"
+}
+
 variable "github_branch" {
   description = "Only workflow runs on this branch may deploy."
   type        = string
