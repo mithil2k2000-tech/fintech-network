@@ -16,9 +16,12 @@ code=$(curl_ -o /dev/null -w '%{http_code}' "https://$HOST/api/v1/users/me")
 [ "$code" = 401 ] || fail "GET /api/v1/users/me without a session returned $code, want 401"
 echo "ok   API reached through the ingress, refuses without a session"
 
-code=$(curl_ -o /dev/null -w '%{http_code}' "https://$HOST/metrics")
-[ "$code" != 200 ] || fail "/metrics is reachable from outside"
-echo "ok   /metrics not exposed"
+# Any unknown path returns the app's index.html (it's a single-page
+# app), so check the content, not the status code.
+if curl_ "https://$HOST/metrics" | grep -q http_requests_total; then
+  fail "the API's /metrics is reachable from outside"
+fi
+echo "ok   API metrics not exposed"
 
 # A real round trip through the database: register, then read the
 # account the registration funded. Proves migrations ran.
