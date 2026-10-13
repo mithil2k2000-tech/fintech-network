@@ -1,0 +1,85 @@
+{{- if .Values.postgresql.enabled }}
+{{- $pg := .Values.postgresql -}}
+{{- $sel := dict "root" $ "component" "postgres" -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "fn.postgresHost" . }}
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "fn.postgresHost" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "fn.selectorLabels" $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fn.selectorLabels" $sel | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "fn.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: postgres
+          image: {{ $pg.image }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ $pg.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ $pg.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fn.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            # A subdirectory, because a fresh volume's root may contain
+            # lost+found and initdb refuses a non-empty directory.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml $pg.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $pg.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $pg.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fn.postgresHost" . }}
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  selector:
+    {{- include "fn.selectorLabels" $sel | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+{{- end }}

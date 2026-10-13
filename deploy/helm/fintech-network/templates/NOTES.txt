@@ -1,0 +1,11 @@
+FinTech Network is installed as release "{{ .Release.Name }}".
+
+{{- range .Values.web.apps }}
+  {{ .name }}: {{ ternary "https" "http" $.Values.ingress.tls.enabled }}://{{ .host }}
+{{- end }}
+
+Watch it come up:
+  kubectl -n {{ .Release.Namespace }} get pods -w
+
+API logs:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "fn.fullname" . }}-api -f

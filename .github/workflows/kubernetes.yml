@@ -1,0 +1,128 @@
+name: Kubernetes
+
+# Proves the Helm chart works, not just that it parses: a real cluster
+# (kind) is built inside the runner, the images are built and loaded,
+# Traefik, Prometheus and Grafana are installed exactly as
+# deploy/kind/up.sh does on a laptop, and the app is checked from the
+# outside. Nothing here touches AWS.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - "services/**"
+      - "apps/**"
+      - "packages/**"
+      - "infra/migrations/**"
+      - ".github/workflows/kubernetes.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/kubernetes.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CHART: deploy/helm/fintech-network
+
+jobs:
+  lint:
+    name: Lint and validate the chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+      - name: helm lint
+        run: |
+          helm lint "$CHART" --strict \
+            --set secrets.jwtSecret=ci-only-0123456789abcdef0123456789abcdef \
+            --set postgresql.password=ci-only
+      # Rendered three ways - local cluster, defaults, and an external
+      # database - and every object checked against the Kubernetes API
+      # schemas, including the Prometheus Operator's.
+      - name: Render and validate
+        run: |
+          common=(--api-versions monitoring.coreos.com/v1
+                  --set secrets.jwtSecret=ci-only-0123456789abcdef0123456789abcdef)
+          helm template t "$CHART" "${common[@]}" --set postgresql.password=ci-only \
+            -f deploy/kind/values-kind.yaml > kind.yaml
+          helm template t "$CHART" "${common[@]}" --set postgresql.password=ci-only > defaults.yaml
+          helm template t "$CHART" "${common[@]}" --set postgresql.enabled=false \
+            --set externalDatabase.url=postgres://u:p@db.example.com:5432/x > external.yaml
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            kind.yaml defaults.yaml external.yaml
+      - name: Settings that must be refused are refused
+        run: |
+          if helm template t "$CHART" --set postgresql.password=x --set secrets.jwtSecret=short >/dev/null 2>&1; then
+            echo "::error::A JWT secret under 32 characters was accepted"; exit 1
+          fi
+          if helm template t "$CHART" --set secrets.jwtSecret=ci-only-0123456789abcdef0123456789abcdef >/dev/null 2>&1; then
+            echo "::error::A missing database password was accepted"; exit 1
+          fi
+          echo "Both refused."
+
+  cluster:
+    name: Install on a real cluster (kind) and test
+    needs: [lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: fintech
+          config: deploy/kind/kind-config.yaml
+      - name: Build, install everything (deploy/kind/up.sh)
+        run: ./deploy/kind/up.sh
+      - name: Smoke test through the ingress
+        run: ./deploy/kind/smoke-test.sh
+      - name: Prometheus is scraping the API
+        run: |
+          kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090 >/dev/null 2>&1 &
+          sleep 5
+          for _ in $(seq 1 24); do
+            up=$(curl -s 'http://localhost:9090/api/v1/query' --data-urlencode 'query=sum(up{service="fintech-api"})' \
+              | jq -r '.data.result[0].value[1] // "0"')
+            if [ "$up" != "0" ]; then echo "API targets up: $up"; exit 0; fi
+            sleep 10
+          done
+          echo "::error::Prometheus never saw the API as up"; exit 1
+      - name: Grafana has the dashboard
+        run: |
+          kubectl -n monitoring port-forward svc/monitoring-grafana 3001:80 >/dev/null 2>&1 &
+          sleep 5
+          pass=$(cat deploy/kind/.local/grafana-password)
+          for _ in $(seq 1 12); do
+            if curl -sf -u "admin:$pass" http://localhost:3001/api/dashboards/uid/fintech-network-api >/dev/null; then
+              echo "Dashboard loaded."; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The FinTech Network dashboard never appeared in Grafana"; exit 1
+      - name: Upgrade runs migrations first and rolls without downtime
+        run: |
+          helm upgrade fintech "$CHART" -n fintech --reuse-values \
+            --set-string podAnnotations.ci-upgrade="$GITHUB_RUN_ID" --wait --timeout 5m
+          kubectl -n fintech rollout status deploy/fintech-api --timeout 3m
+          ./deploy/kind/smoke-test.sh
+      - name: What was running
+        if: always()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl -n fintech get events --sort-by=.lastTimestamp | tail -40
+          kubectl -n fintech logs deploy/fintech-api --tail=60 || true
+          kubectl -n fintech logs -l app.kubernetes.io/component=migrate --tail=60 || true

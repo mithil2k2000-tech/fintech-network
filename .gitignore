@@ -15,3 +15,6 @@ playwright-report/
 *.tfvars
 !*.tfvars.example
 crash.log
+
+# Secrets and the self-signed certificate deploy/kind/up.sh generates.
+deploy/kind/.local/

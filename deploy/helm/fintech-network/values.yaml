@@ -1,0 +1,120 @@
+# Settings for the FinTech Network chart. deploy/kind/values-kind.yaml
+# shows the ones a local cluster changes.
+
+appName: "FinTech Network"
+
+image:
+  # Empty means images are named <repositoryPrefix>/<app>:<tag>, which is
+  # what deploy/kind/up.sh builds and loads. For ECR set it to
+  # <account>.dkr.ecr.<region>.amazonaws.com.
+  registry: ""
+  repositoryPrefix: fintech-network
+  tag: local
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Extra annotations on the API pods. Changing any of them rolls the pods.
+podAnnotations: {}
+
+api:
+  replicas: 1
+  logLevel: info
+  # Proxies between the browser and the API (the ingress controller is
+  # one). Decides whose address the per-client rate limits count.
+  trustProxyHops: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+  autoscaling:
+    # Needs metrics-server in the cluster. Without it the HPA has no CPU
+    # figures and simply holds the API at minReplicas.
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    maxUnavailable: 1
+
+migrations:
+  # A Job that applies database migrations once per install or upgrade,
+  # before the new API version rolls out - never from the API pods
+  # themselves, where replicas would race to alter the same schema.
+  enabled: true
+  backoffLimit: 10
+
+web:
+  # Each front end is served on its own host. They can't share one: the
+  # session cookie is SameSite=Strict, so an app must be the same origin
+  # as the /api it calls.
+  apps:
+    - name: web-consumer
+      host: app.localtest.me
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations: {}
+  tls:
+    # The API refuses to start in production with a plain-http origin,
+    # so TLS is not optional in practice.
+    enabled: true
+    secretName: fintech-tls
+
+secrets:
+  # Name of an existing Secret holding DATABASE_URL and JWT_SECRET. When
+  # set, the chart creates no Secret of its own (use with an external
+  # database).
+  existingSecret: ""
+  # Session signing secret, at least 32 characters. Required unless
+  # existingSecret is set.
+  jwtSecret: ""
+
+postgresql:
+  # A single PostgreSQL pod for local and test clusters. Anything real
+  # uses a managed database via externalDatabase.url instead.
+  enabled: true
+  image: postgres:16-alpine
+  database: fintech_network
+  username: fintech
+  password: ""
+  storage: 1Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+externalDatabase:
+  # Full connection string, used when postgresql.enabled is false and no
+  # existingSecret is given.
+  url: ""
+
+networkPolicy:
+  enabled: true
+  # Namespaces allowed to reach the API: the ingress controller's, and
+  # the one Prometheus scrapes from.
+  ingressControllerNamespace: traefik
+  monitoringNamespace: monitoring
+
+metrics:
+  # These need the Prometheus Operator CRDs (kube-prometheus-stack) and
+  # are skipped automatically when the cluster doesn't have them.
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+  prometheusRule:
+    enabled: true
+  grafanaDashboard:
+    enabled: true

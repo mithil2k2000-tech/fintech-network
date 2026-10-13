@@ -1,0 +1,78 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "fn.fullname" . -}}
+{{- $np := .Values.networkPolicy -}}
+# Who may open a connection to whom. Everything not listed is refused:
+#   ingress controller -> front ends, API
+#   front ends         -> API
+#   Prometheus         -> API (/metrics)
+#   API, migrations    -> database
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fn.selectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.monitoringNamespace }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              fintech-network/tier: web
+      ports:
+        - port: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-web
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      fintech-network/tier: web
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}
+      ports:
+        - port: 80
+{{- if .Values.postgresql.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-postgres
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fn.selectorLabels" (dict "root" $ "component" "postgres") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "fn.selectorLabels" (dict "root" $ "component" "api") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "fn.selectorLabels" (dict "root" $ "component" "migrate") | nindent 14 }}
+      ports:
+        - port: 5432
+{{- end }}
+{{- end }}

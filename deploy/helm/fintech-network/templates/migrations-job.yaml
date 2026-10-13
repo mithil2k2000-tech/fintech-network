@@ -1,0 +1,67 @@
+{{- if .Values.migrations.enabled }}
+{{- $sel := dict "root" $ "component" "migrate" -}}
+# Applies migrations once per install or upgrade, as a Helm hook:
+#   post-install  - the database exists by then (it's part of the release)
+#   pre-upgrade   - before the new API version starts, so it always finds
+#                   the schema it expects
+# Migrations are additive (CI enforces it), so the old version keeps
+# working against the new schema while this runs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fn.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # On a fresh install the database may still be starting; retrying is
+  # simpler than a wait loop, and a migration either applies or doesn't.
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "fn.selectorLabels" $sel | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "fn.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "fn.image" (dict "root" $ "name" "api") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - node_modules/.bin/node-pg-migrate
+            - --migrations-dir
+            - ../../infra/migrations
+            - up
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fn.secretName" . }}
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            {{- include "fn.apiContainerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,13 @@
+# Chart values for the local cluster. Secrets are passed by up.sh, never
+# written here.
+image:
+  tag: local
+  pullPolicy: Never
+web:
+  apps:
+    - name: web-consumer
+      host: app.localtest.me
+    - name: web-merchant
+      host: till.localtest.me
+    - name: web-admin
+      host: admin.localtest.me

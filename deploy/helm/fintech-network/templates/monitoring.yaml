@@ -1,0 +1,74 @@
+{{- $fullname := include "fn.fullname" . -}}
+{{- $hasOperator := .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" -}}
+{{- if and .Values.metrics.serviceMonitor.enabled $hasOperator }}
+# Tells Prometheus to scrape the API's /metrics on every pod.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "fn.selectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}
+{{- if and .Values.metrics.prometheusRule.enabled $hasOperator }}
+---
+# Alerts, evaluated by Prometheus. Each says what is wrong in words, so
+# whoever sees it first doesn't have to decode a query.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullname }}-api
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: fintech-network-api
+      rules:
+        - alert: FintechApiDown
+          expr: absent(up{service="{{ $fullname }}-api"} == 1)
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: No API pod has answered a scrape for 2 minutes.
+        - alert: FintechApiHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{service="{{ $fullname }}-api", status=~"5.."}[5m]))
+              / clamp_min(sum(rate(http_requests_total{service="{{ $fullname }}-api"}[5m])), 1e-9) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: More than 5% of API requests have failed with a server error for 5 minutes.
+        - alert: FintechApiSlow
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(http_request_duration_seconds_bucket{service="{{ $fullname }}-api"}[5m]))) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 95% of API requests have taken longer than a second for 10 minutes.
+{{- end }}
+{{- if .Values.metrics.grafanaDashboard.enabled }}
+---
+# Picked up by Grafana's dashboard sidecar (kube-prometheus-stack) from
+# any namespace, by this label.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-dashboard
+  labels:
+    {{- include "fn.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  fintech-network.json: |-
+    {{- .Files.Get "files/dashboard.json" | nindent 4 }}
+{{- end }}

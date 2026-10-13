@@ -1,0 +1,17 @@
+# Traefik as the ingress controller, reachable through the node ports
+# kind-config.yaml maps to your machine's 80 and 443.
+service:
+  type: NodePort
+ports:
+  web:
+    nodePort: 30080
+  websecure:
+    nodePort: 30443
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+providers:
+  kubernetesIngress:
+    enabled: true
+  kubernetesCRD:
+    enabled: false
