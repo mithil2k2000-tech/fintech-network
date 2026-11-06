@@ -20,7 +20,7 @@ resource "aws_cloudwatch_log_group" "api" {
 }
 
 resource "aws_cloudwatch_log_group" "web" {
-  for_each = local.hosts
+  for_each = local.app_keys
 
   name              = "/ecs/${local.prefix}/${each.key}"
   retention_in_days = var.log_retention_days
@@ -61,7 +61,7 @@ resource "aws_ecs_task_definition" "api" {
         # One proxy (the load balancer) sits in front, so the client's
         # address is the last entry it added to X-Forwarded-For. Without
         # this every user shares one rate limit: the load balancer's.
-        { name = "TRUST_PROXY_HOPS", value = "1" },
+        { name = "TRUST_PROXY_HOPS", value = tostring(local.proxy_hops) },
       ]
 
       secrets = [
@@ -178,7 +178,7 @@ resource "aws_appautoscaling_policy" "api_cpu" {
 # built into it.
 
 resource "aws_ecs_task_definition" "web" {
-  for_each = local.hosts
+  for_each = local.app_keys
 
   family                   = "${local.prefix}-${each.key}"
   requires_compatibilities = ["FARGATE"]
@@ -222,7 +222,7 @@ resource "aws_ecs_task_definition" "web" {
 }
 
 resource "aws_ecs_service" "web" {
-  for_each = local.hosts
+  for_each = local.app_keys
 
   name            = "${local.prefix}-${each.key}"
   cluster         = aws_ecs_cluster.main.id

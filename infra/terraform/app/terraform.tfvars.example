@@ -1,10 +1,14 @@
 # Copy to terraform.tfvars (which is git-ignored) and fill in.
 
-# A public hosted zone you own in Route 53, and the name inside it the
-# apps should hang off. This gives app.fintech.example.com,
+# Own domain: a public hosted zone you own in Route 53, and the name
+# inside it the apps should hang off. This gives app.fintech.example.com,
 # till.fintech.example.com and admin.fintech.example.com.
 route53_zone_name = "example.com"
 domain_name       = "fintech.example.com"
+# No domain: leave both empty and each app gets a https://<id>.cloudfront.net
+# address instead (docs/deployment/aws.md). The admin app is not deployed.
+# route53_zone_name = ""
+# domain_name       = ""
 
 # Alarms, GuardDuty findings and failed deployments. AWS sends a
 # confirmation email first; nothing arrives until you click it.

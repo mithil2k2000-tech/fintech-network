@@ -50,10 +50,22 @@ a production service; it doesn't make it one, and
 - An AWS account, and the AWS CLI signed in as an administrator
   (`aws sts get-caller-identity` should answer).
 - Terraform 1.10 or newer.
-- **A domain in Route 53.** HTTPS needs a certificate and a certificate
-  needs a name, and the API refuses to run in production without HTTPS.
-  Either register a domain in Route 53, or create a hosted zone for a
-  subdomain of one you own and point its NS records at it.
+- **HTTPS, one of two ways.** The API refuses to run in production without
+  HTTPS, so pick one:
+  - **No domain (CloudFront mode).** Leave `domain_name` and
+    `route53_zone_name` empty. Each front end gets its own CloudFront
+    distribution and `https://<id>.cloudfront.net` address with CloudFront's
+    certificate. The load balancer then accepts plain HTTP from CloudFront's
+    origin-facing addresses only, and only forwards requests that carry a
+    secret header CloudFront adds. The admin app isn't deployed in this mode:
+    the load balancer sees CloudFront's address rather than yours, so its IP
+    allow-list can't work (promote and manage admins with the ops workflow).
+    This is the mode to use on an AWS Free plan account, which can't register
+    domains.
+  - **Your own domain.** Register a domain in Route 53, or create a hosted
+    zone for a subdomain of one you own and point its NS records at it, then
+    set both variables. You get `app.`, `till.` and `admin.` host names and an
+    ACM certificate on the load balancer.
 - This repository pushed to GitHub, with CI passing.
 
 ## First-time setup

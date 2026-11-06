@@ -66,23 +66,39 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
   port              = 80
 
+  # Own domain: redirect to HTTPS. CloudFront mode: this is the listener
+  # CloudFront talks to, and anything that doesn't match a rule gets a 404.
   default_action {
-    type = "redirect"
+    type = local.use_cloudfront ? "fixed-response" : "redirect"
 
-    redirect {
-      protocol    = "HTTPS"
-      port        = "443"
-      status_code = "HTTP_301"
+    dynamic "redirect" {
+      for_each = local.use_cloudfront ? [] : [1]
+      content {
+        protocol    = "HTTPS"
+        port        = "443"
+        status_code = "HTTP_301"
+      }
+    }
+
+    dynamic "fixed_response" {
+      for_each = local.use_cloudfront ? [1] : []
+      content {
+        content_type = "text/plain"
+        message_body = "Not found"
+        status_code  = "404"
+      }
     }
   }
 }
 
 resource "aws_lb_listener" "https" {
+  count = local.use_cloudfront ? 0 : 1
+
   load_balancer_arn = aws_lb.main.arn
   protocol          = "HTTPS"
   port              = 443
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate_validation.main.certificate_arn
+  certificate_arn   = aws_acm_certificate_validation.main[0].certificate_arn
 
   # Anything that isn't one of our host names — a scanner hitting the
   # raw address, mostly — gets nothing useful.
@@ -104,7 +120,7 @@ resource "aws_lb_listener" "https" {
 resource "aws_lb_listener_rule" "admin_api_allowed" {
   count = local.admin_enabled ? 1 : 0
 
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = local.listener_arn
   priority     = 10
 
   condition {
@@ -129,7 +145,7 @@ resource "aws_lb_listener_rule" "admin_api_allowed" {
 # app. The API still checks the role itself; this is a second lock on
 # the same door, not a replacement for the first.
 resource "aws_lb_listener_rule" "admin_api_denied" {
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = local.listener_arn
   priority     = 20
 
   condition {
@@ -153,7 +169,7 @@ resource "aws_lb_listener_rule" "admin_api_denied" {
 # /health and /metrics stay unreachable from outside, which is what the
 # app's own docs ask for.
 resource "aws_lb_listener_rule" "api" {
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = local.listener_arn
   priority     = 30
 
   condition {
@@ -168,6 +184,16 @@ resource "aws_lb_listener_rule" "api" {
     }
   }
 
+  dynamic "condition" {
+    for_each = local.use_cloudfront ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = [random_password.origin_verify[0].result]
+      }
+    }
+  }
+
   action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.api.arn
@@ -176,14 +202,24 @@ resource "aws_lb_listener_rule" "api" {
 
 # Everything else on a host goes to that host's front end.
 resource "aws_lb_listener_rule" "web" {
-  for_each = { for app, host in local.hosts : app => host if app != "web-admin" }
+  for_each = { for app in local.app_keys : app => local.hosts[app] if app != "web-admin" }
 
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = local.listener_arn
   priority     = local.web_rule_priority[each.key]
 
   condition {
     host_header {
       values = [each.value]
+    }
+  }
+
+  dynamic "condition" {
+    for_each = local.use_cloudfront ? [1] : []
+    content {
+      http_header {
+        http_header_name = "X-Origin-Verify"
+        values           = [random_password.origin_verify[0].result]
+      }
     }
   }
 
@@ -198,7 +234,7 @@ resource "aws_lb_listener_rule" "web" {
 resource "aws_lb_listener_rule" "web_admin" {
   count = local.admin_enabled ? 1 : 0
 
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = local.listener_arn
   priority     = local.web_rule_priority["web-admin"]
 
   condition {

@@ -41,6 +41,8 @@ resource "aws_security_group" "db" {
 # ---- Load balancer ----------------------------------------------------
 
 resource "aws_vpc_security_group_ingress_rule" "alb_https" {
+  count = local.use_cloudfront ? 0 : 1
+
   security_group_id = aws_security_group.alb.id
   description       = "HTTPS from anywhere"
   cidr_ipv4         = "0.0.0.0/0"
@@ -51,8 +53,9 @@ resource "aws_vpc_security_group_ingress_rule" "alb_https" {
 
 resource "aws_vpc_security_group_ingress_rule" "alb_http" {
   security_group_id = aws_security_group.alb.id
-  description       = "HTTP from anywhere, only ever answered with a redirect to HTTPS"
-  cidr_ipv4         = "0.0.0.0/0"
+  description       = local.use_cloudfront ? "HTTP from CloudFront only" : "HTTP from anywhere, only ever answered with a redirect to HTTPS"
+  cidr_ipv4         = local.use_cloudfront ? null : "0.0.0.0/0"
+  prefix_list_id    = local.use_cloudfront ? data.aws_ec2_managed_prefix_list.cloudfront[0].id : null
   ip_protocol       = "tcp"
   from_port         = 80
   to_port           = 80

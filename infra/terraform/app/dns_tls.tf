@@ -2,11 +2,14 @@
 # hosted zone and renewed by AWS for as long as those records exist.
 
 data "aws_route53_zone" "main" {
+  count        = local.use_cloudfront ? 0 : 1
   name         = var.route53_zone_name
   private_zone = false
 }
 
 resource "aws_acm_certificate" "main" {
+  count = local.use_cloudfront ? 0 : 1
+
   domain_name               = local.host_list[0]
   subject_alternative_names = slice(local.host_list, 1, length(local.host_list))
   validation_method         = "DNS"
@@ -20,14 +23,14 @@ resource "aws_acm_certificate" "main" {
 
 resource "aws_route53_record" "certificate_validation" {
   for_each = {
-    for option in aws_acm_certificate.main.domain_validation_options : option.domain_name => {
+    for option in(local.use_cloudfront ? [] : aws_acm_certificate.main[0].domain_validation_options) : option.domain_name => {
       name   = option.resource_record_name
       type   = option.resource_record_type
       record = option.resource_record_value
     }
   }
 
-  zone_id         = data.aws_route53_zone.main.zone_id
+  zone_id         = data.aws_route53_zone.main[0].zone_id
   name            = each.value.name
   type            = each.value.type
   records         = [each.value.record]
@@ -36,14 +39,16 @@ resource "aws_route53_record" "certificate_validation" {
 }
 
 resource "aws_acm_certificate_validation" "main" {
-  certificate_arn         = aws_acm_certificate.main.arn
+  count = local.use_cloudfront ? 0 : 1
+
+  certificate_arn         = aws_acm_certificate.main[0].arn
   validation_record_fqdns = [for record in aws_route53_record.certificate_validation : record.fqdn]
 }
 
 resource "aws_route53_record" "app" {
-  for_each = local.hosts
+  for_each = local.use_cloudfront ? {} : local.hosts
 
-  zone_id = data.aws_route53_zone.main.zone_id
+  zone_id = data.aws_route53_zone.main[0].zone_id
   name    = each.value
   type    = "A"
 

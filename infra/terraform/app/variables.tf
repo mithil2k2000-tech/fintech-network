@@ -1,13 +1,15 @@
 # ---- Required: things only you know -----------------------------------
 
 variable "route53_zone_name" {
-  description = "A public Route 53 hosted zone in this account, e.g. \"example.com\"."
+  description = "A public Route 53 hosted zone in this account, e.g. \"example.com\". Leave empty (with domain_name) to serve from CloudFront's own *.cloudfront.net addresses instead."
   type        = string
+  default     = ""
 }
 
 variable "domain_name" {
   description = "Base name the apps hang off, inside that zone. \"fintech.example.com\" gives app.fintech.example.com, till.… and admin.…"
   type        = string
+  default     = ""
 }
 
 variable "alert_email" {
